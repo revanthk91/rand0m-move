@@ -1,0 +1,16 @@
+[package]
+name = "dapp"
+version = "1.0.0"
+authors = []
+
+[addresses]
+revanth = "0x112c6f4896c1cf40b8e8bcf76a091c7c88bad93495887f45c96b86820ec86a9e"
+
+[dev-addresses]
+
+[dependencies.AptosFramework]
+git = "https://github.com/aptos-labs/aptos-core.git"
+rev = "randomnet"
+subdir = "aptos-move/framework/aptos-framework"
+
+[dev-dependencies]

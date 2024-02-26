@@ -5,6 +5,7 @@ module revanth::dapp {
     use std::option;
 
     use aptos_framework::table;
+    use aptos_framework::smart_table;
 
     // error codes
     const E_INVALID_INPUT: u8 = 1;
@@ -29,26 +30,29 @@ module revanth::dapp {
     // Player (oomp)
     struct Player has key, store {
         address: address,
-        inventory: table::Table<u64, u64>,
-        i: u64,
-        j: u64,
+        inventory: table::Table<u8, u8>,
+        position: Move,
     }
 
     // Item (oomp)
     struct Item has key, store, drop {
-        item_code: u64,
-        i: u64,
-        j: u64,
+        item_code: u8,
+        position: Move,
         id: u64,
     }
 
     // Player ( lowest )
     struct Slot has key, store {
-        players_list: vector<&Player>,
+        player: option::Option<PlayerIcon>, 
+    }
+
+    // Player Icon ( wow )
+    struct PlayerIcon has key, store, drop, copy {
+        player_id: u64,
     }
 
     // Move ( really )
-    struct Move has key, store, drop {
+    struct Move has key, store, drop, copy {
         x: u64,
         y: u64,
     }
@@ -84,9 +88,17 @@ module revanth::dapp {
     /*
     Creates a single room and adds it to RoomList
     */
-    fun create_room() {
+    fun create_room() acquires RoomsList {
         let roomslist = borrow_global_mut<RoomsList>(@revanth);
-        let grid = vector::empty<vector<Slot>>();
+        let room = Room {
+            name: string::utf8(b"New Room"),
+            grid: vector::empty<vector<Slot>>(),
+            id: vector::length<Room>(&roomslist.rooms_list),
+            moves: table::new<address, Move>(),
+            inactive: true,
+            players_list: vector::empty<Player>(),
+            items_list: vector::empty<Item>(),
+        };
 
         let i = 0;
         let j = 0;
@@ -96,73 +108,72 @@ module revanth::dapp {
 
             j = 0;
             while(j < C_SIZE) {
+                // create Slot
                 vector::push_back(
                     &mut row,
                     Slot {
-                        players_list: vector::empty<&Player>()
+                        player: option::none<PlayerIcon>(),
                     }
                 );
+
+                // Random Item Generation
+                // use j, i => x, y
+
                 
                 j = j+1;
             };
 
-            vector::push_back(&mut grid, row);
+            vector::push_back(&mut room.grid, row);
             i = i+1;
         };
 
-        let room = Room {
-            name: string::utf8(b"New Room"),
-            grid,
-            id: vector::length(roomslist.rooms_list),
-            moves: table::empty<address, Move>(),
-            inactive: true,
-            players_list: vector::empty<Player>(),
-            items_list: vector::empty<Item>(),
-        };
+        
 
-        vector::push_back(&mut roomslist.room_list, room);
+        vector::push_back(&mut roomslist.rooms_list, room);
     }
 
     /*
     Adds player into the Room Moves Dictionary.
     */
-    fun add_player(player: address, room_id: u8) {
+    fun add_player(player_addr: address, room_id: u64) acquires RoomsList {
         let rooms = borrow_global_mut<RoomsList>(@revanth);
         let room = vector::borrow_mut(&mut rooms.rooms_list, room_id);
         
         let player = Player {
-            address,
-            inventory: table::empty<u64, u64>(),
-            x: 0,
-            y: 0,
+            address: player_addr,
+            inventory: table::new<u8, u8>(),
+            position: Move {
+                x: 0,
+                y: 0,
+            }
         };
 
         // add in player list
         vector::push_back(
-            &mut room.player_list,
+            &mut room.players_list,
             player,
         );
 
-        // add in grid
-        let slot = get_slot(&room.grid, 0, 0);
-        vector::push_back(
-            &mut slot.player_list,
-            &player,
-        );
+        // add in PlayerIcon to grid
+        let slot = get_slot_mut(&mut room.grid, 0, 0);
+        slot.player = option::some<PlayerIcon>(PlayerIcon {
+            player_id: vector::length<Player>(&room.players_list)
+        });
+
 
     }
 
     /*
     Add input, to be simulated next turn
     */
-    fun add_player_input(player: address, room_id: u8, x: u64, y: u64) {
-        assert!(x >= 0 && x < C_SIZE && y >= 0 && y < C_SIZE, E_INVALID_INPUT);
+    fun add_player_input(player: address, room_id: u64, x: u64, y: u64) acquires RoomsList {
+        // assert!( (x >= 0 && x < C_SIZE) && (y >= 0 && y < C_SIZE), E_INVALID_INPUT);
 
         let rooms = borrow_global_mut<RoomsList>(@revanth);
         let room = vector::borrow_mut(&mut rooms.rooms_list, room_id);
 
         // Check the player already exists
-        assert!(table::contains(&room.moves, player), E_PLAYER_ALREADY_JOINED);
+        // assert!(table::contains(&room.moves, player), E_PLAYER_ALREADY_JOINED);
 
         table::upsert(
             &mut room.moves,
@@ -180,105 +191,140 @@ module revanth::dapp {
     Use APTOS ROLL and simulate every move.
     Do it last.
     */
-    public entry fun update_room(room_id: u64) {
-        let rooms = borrow_global_mut<RoomsList>(@revanth);
-        let room = vector::borrow_mut(&mut rooms.rooms_list, room_id);
-        let i;
-        let deleted_items = vector::empty<u64>();
+    public entry fun update_room(room_id: u64) acquires RoomsList {
+        let players_len = {
+            let rooms = borrow_global<RoomsList>(@revanth);
+            let room = vector::borrow(&rooms.rooms_list, room_id);
 
-        /// Stage 1: Move Player
-        i = 0;
-        while(i < vector::length(&room.players_list)) {
-            // one step move
-            let player = vector::borrow(&room.players_list, i);
-            let newmove = table::borrow(&room.moves, player.address);
+            vector::length<Player>(&room.players_list)
+        };
 
-            let newslot = get_slot(&room.grid, newmove.x, newmove.y);
-            let slot = get_slot(&room.grid, player.x, player.y);
+        let items_len = {
+            let rooms = borrow_global<RoomsList>(@revanth);
+            let room = vector::borrow(&rooms.rooms_list, room_id);
 
-            // move to new slot
-            vector::push_back(
-                &mut newslot.players_list,
-                player,
-            );
+            vector::length<Item>(&room.items_list)
+        };
 
-            // delete player from old slot ( illusion of movement )
-            vector::remove_value(&mut slot.players_list, player);
+        // Stage 1: Move Player
+        let map = smart_table::new<Move, vector<u64>>();
+        let moves = vector::empty<Move>();
+        let map_ref = &mut map;
+
+
+        let i = 0;
+        while(i < players_len) {
+            
+            let (nextmove, room_id, current_pos) = {
+
+                let rooms = borrow_global<RoomsList>(@revanth);
+                let room = vector::borrow(&rooms.rooms_list, room_id);
+
+                let player = vector::borrow(&room.players_list, i);
+                let nextmove = table::borrow(&room.moves, player.address);
+
+                (nextmove, room.id, player.position)
+            };
+
+
+            // Map Move->PLayerId
+            if( smart_table::contains(map_ref, *nextmove) ) {
+                let ids_list = smart_table::borrow_mut(map_ref, *nextmove);
+                vector::push_back(
+                    ids_list,
+                    i,
+                );
+            }
+            else {
+                // new move map
+                vector::push_back(
+                    &mut moves,
+                    *nextmove,
+                );
+
+                // add this move to table
+                smart_table::add(
+                    map_ref ,
+                    *nextmove,
+                    vector::singleton<u64>(i),
+                );
+            };
+           
 
             i = i + 1;
         };
 
-        /// Stage 2: Player + Item fusion ( Roll )
+        // Iterate through Colliding moves, and move only one player
+        let j = 0;
+        while( j < vector::length(&moves)) {
+            let nextmove = vector::borrow(&moves, j);
+            let mapped_players = smart_table::borrow(map_ref, *nextmove);
+
+            // ROLL to pick a player out MAX. 4
+            let pick_id = get_rand_range(0, vector::length<u64>(mapped_players));
+
+            let current_pos = {
+                let rooms = borrow_global<RoomsList>(@revanth);
+                let room = vector::borrow(&rooms.rooms_list, room_id);
+
+                let player = vector::borrow(&room.players_list, i);
+                player.position
+            };
+
+            // del old slot
+            slot_del_player(room_id, current_pos.x, current_pos.y);
+
+            // add new slot
+            slot_add_player(room_id, pick_id, nextmove.x, nextmove.y);
+
+            j = j + 1;
+        };
+
+        // drop the smart table
+        smart_table::destroy(map);
+
+        // Stage 2: Player + Item = Event ( Roll )
         i = 0;
-        while(i < vector::length(&room.items_list)) {
-            let item = vector::borrow(&room.items_list, i);
-            let slot = vector::borrow(
-                vector::borrow(room.grid, i),
-                item.j,
-            );
-            let slot_players = slot.players_list;
-            
+        while(i < items_len) {
+            let (item_code, position) = {
+                let rooms = borrow_global<RoomsList>(@revanth);
+                let room = vector::borrow(&rooms.rooms_list, room_id);
 
-            // EVENT: BOX
-            if( item.item_code == I_BOX ) {
-                // box may have key
-                // key reaches one player
-                let has_key = get_rand_range(0,100) < 50;
-                let select_player = vector::borrow(
-                    &slot_players,
-                    get_rand_range(0, vector::length(&slot_players))
-                );
+                let item = vector::borrow(&room.items_list, i);
+                ( item.item_code, item.position )
+            };
 
-                if(has_key) {
-                    table::upsert(
-                        &mut select_player.inventory,
-                        I_KEY,
-                        1,
-                    );
+            // EVENT: BOX   
+            if( item_code == I_BOX ) {
+                // key probability
+
+                // select a player to give key
+
+
+                    // add to inventory
 
                     // Delete Item ( only from items_list )
-                    vector::remove(
-                        &mut room.items_list,
-                        item.id,
-                    );
 
-                };
+
+
 
             }
             // EVENT: EXIT DOOR
-            else if( item.item_code == I_EXIT ) {
-                // player should have key, only one player wins
-                // key opens door
-                let j = 0;
-                let players_w_keys = vector::empty<&Player>
+            else if( item_code == I_EXIT ) {
+                // player should have key, only one player wins 
+
 
                 // filter players with keys
-                while(j < vector::length(&slot_players)) {
-                    let p = vector::borrow(&slot_players, j);
 
-                    if(table::contains(&p.inventory, I_KEY)) {
-                        vector::push_back(
-                            &mut players_w_keys,
-                            p,
-                        )
-                    };
-                };
 
                 // pick a winner
-                let player_won = vector::borrow(
-                    &players_w_keys,
-                    get_rand_range(0, vector::length(&players_w_keys))
-                );
+
 
                 // give player WIN item
-                table::upsert(
-                    &mut player_won.inventory,
-                    I_WON,
-                    1,
-                );
+
 
                 // END flag
-                room.inactive = true;
+
             }
             else {
                 // pass
@@ -289,18 +335,131 @@ module revanth::dapp {
     }
 
     /*
-    Helper Functions
+    Adds item to the given room at x, y
+    No collision check
     */
-    public fun get_slot(x: u64, y: u64, grid: &vector<vector<Slot>>): &Slot {
-        let row = vector::borrow_mut(grid, y);
+    fun add_item(roomid: u64, item_code: u8, x: u64, y: u64) acquires RoomsList{
+        let rooms = borrow_global_mut<RoomsList>(@revanth);
+        let room = vector::borrow_mut(&mut rooms.rooms_list, roomid);
+        let items_len = vector::length<Item>(&room.items_list);
 
-        vector::borrow_mut(row, x);
+        // add to rooms item list
+        vector::push_back(
+            &mut room.items_list,
+            Item {
+                item_code,
+                position: Move {
+                    x,
+                    y,
+                },
+                id: items_len,
+            }
+        );
+        
     }
 
-    /// Change in production
-    public fun get_rand_range(l: u64, h: 64): u64 {
-        
+    /*
+    Helper Functions
+    */
+    public fun get_slot_mut(grid: &mut vector<vector<Slot>>, x: u64, y: u64): &mut Slot  {
+        let row = vector::borrow_mut(grid, y);
+
+        vector::borrow_mut(row, x)
+    }
+
+    public fun get_slot(grid: &vector<vector<Slot>>, x: u64, y: u64): &Slot {
+        let row = vector::borrow(grid, y);
+
+        vector::borrow(row, x)
+    }
+
+    public fun get_rand_range(l: u64, _h: u64): u64 {
+
         l
+    }
+
+    /*
+    Game Functions
+    */
+    fun slot_add_player(room_id: u64, player_id: u64, x: u64, y: u64) acquires RoomsList{
+        let roomslist = borrow_global_mut<RoomsList>(@revanth);
+        let room = vector::borrow_mut(&mut roomslist.rooms_list, room_id);
+
+        let row = vector::borrow_mut(&mut room.grid, y);
+        let slot = vector::borrow_mut(row, x);
+
+        slot.player = option::some<PlayerIcon>(
+            PlayerIcon {
+                player_id,
+            }
+        );
+
+        // also update player position ( not for items, cause items dont move, only appear / dissappear )
+        let player = vector::borrow_mut(&mut room.players_list, player_id);
+        player.position = Move {
+            x,
+            y,
+        };
+
+    }
+
+    fun slot_del_player(room_id: u64, x: u64, y: u64) acquires RoomsList {
+        let roomslist = borrow_global_mut<RoomsList>(@revanth);
+        let room = vector::borrow_mut(&mut roomslist.rooms_list, room_id);
+
+        let row = vector::borrow_mut(&mut room.grid, y);
+        let slot = vector::borrow_mut(row, x);
+
+        slot.player = option::none<PlayerIcon>();
+    }
+
+    fun room_add_item(room_id: u64, item_code: u8, x: u64, y: u64) acquires RoomsList {
+        let roomslist = borrow_global_mut<RoomsList>(@revanth);
+        let room = vector::borrow_mut(&mut roomslist.rooms_list, room_id);
+        let len = vector::length<Item>(&room.items_list);
+
+        vector::push_back(
+            &mut room.items_list,
+            Item {
+                item_code,
+                position: Move {x,y},
+                id: len,
+            }
+        );
+
+    }
+
+    fun room_del_item(room_id: u64, item_id: u64) acquires RoomsList {
+        let roomslist = borrow_global_mut<RoomsList>(@revanth);
+        let room = vector::borrow_mut(&mut roomslist.rooms_list, room_id);
+        let len = vector::length<Item>(&room.items_list);
+
+        {
+            vector::swap_remove(
+                &mut room.items_list,
+                item_id,
+            );
+        };
+        
+        // AA for list, items cannot loose their context id
+        let x_item = vector::borrow_mut(&mut room.items_list, item_id);
+        x_item.id = item_id;
+    }
+
+    /*
+    To Player's inventory
+    */
+    fun player_add_item(room_id: u64, player_id: u64, item_code: u8) acquires RoomsList {
+        let roomslist = borrow_global_mut<RoomsList>(@revanth);
+        let room = vector::borrow_mut(&mut roomslist.rooms_list, room_id);
+        let player = vector::borrow_mut(&mut room.players_list, player_id);
+
+        table::upsert(
+            &mut player.inventory,
+            item_code,
+            1,
+        );
+
     }
 
 

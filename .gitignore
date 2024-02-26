@@ -1,3 +1,5 @@
 .aptos
 scripts
 tests
+build
+grid.json

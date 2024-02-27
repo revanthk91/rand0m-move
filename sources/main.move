@@ -3,6 +3,7 @@ module revanth::dapp {
     use std::string;
     use std::vector;
     use std::option;
+    use std::signer;
 
     use aptos_framework::table;
     use aptos_framework::smart_table;
@@ -24,7 +25,7 @@ module revanth::dapp {
         moves: table::Table<address,Move>,
         players_list: vector<Player>,
         items_list: vector<Item>,
-        inactive: bool,
+        active: bool,
     }
 
     // Player (oomp)
@@ -35,7 +36,7 @@ module revanth::dapp {
     }
 
     // Item (oomp)
-    struct Item has key, store, drop {
+    struct Item has key, store, copy, drop {
         item_code: u8,
         position: Move,
         id: u64,
@@ -57,11 +58,42 @@ module revanth::dapp {
         y: u64,
     }
 
+    // VIEW returns
+    struct RoomMiniView has key, store, drop, copy {
+        name: string::String,
+        id: u64,
+        active: bool,
+        player_count: u64,
+        max_player_count: u8,
+    }
+
+    struct PlayerMiniView has key, store, drop, copy {
+        address: address,
+        inventory: vector<u64>,
+        position: Move,
+    }
+
+    struct RoomsListView has key, store, drop, copy {
+        rooms_list: vector<RoomMiniView>,
+    }
+    
+    struct RoomView has key, store, drop, copy {
+        name: string::String,
+        id: u64,
+        active: bool,
+        players_list: vector<PlayerMiniView>,
+        items_list: vector<Item>,
+    }
+
+
     // items
     const I_EXIT: u8 = 2;
     const I_KEY: u8 = 3;
     const I_BOX: u8 = 4;
     const I_WON: u8 = 5;
+
+    // last item id
+    const I_MAX: u8 = 5;
 
     // directions
     const D_UP: u8 = 1;
@@ -76,7 +108,7 @@ module revanth::dapp {
     /*
     runs only once in lifetime
     */
-    fun init_module(account: &signer) {
+    public entry fun init_module(account: &signer) {
         move_to<RoomsList>(
             account,
             RoomsList {
@@ -88,14 +120,14 @@ module revanth::dapp {
     /*
     Creates a single room and adds it to RoomList
     */
-    fun create_room() acquires RoomsList {
+    public entry fun create_room() acquires RoomsList {
         let roomslist = borrow_global_mut<RoomsList>(@revanth);
         let room = Room {
             name: string::utf8(b"New Room"),
             grid: vector::empty<vector<Slot>>(),
             id: vector::length<Room>(&roomslist.rooms_list),
             moves: table::new<address, Move>(),
-            inactive: true,
+            active: true,
             players_list: vector::empty<Player>(),
             items_list: vector::empty<Item>(),
         };
@@ -135,7 +167,7 @@ module revanth::dapp {
     /*
     Adds player into the Room Moves Dictionary.
     */
-    fun add_player(player_addr: address, room_id: u64) acquires RoomsList {
+    public entry fun add_player(player_addr: address, room_id: u64, x:u64, y: u64) acquires RoomsList {
         let rooms = borrow_global_mut<RoomsList>(@revanth);
         let room = vector::borrow_mut(&mut rooms.rooms_list, room_id);
         
@@ -143,8 +175,8 @@ module revanth::dapp {
             address: player_addr,
             inventory: table::new<u8, u8>(),
             position: Move {
-                x: 0,
-                y: 0,
+                x,
+                y,
             }
         };
 
@@ -155,18 +187,26 @@ module revanth::dapp {
         );
 
         // add in PlayerIcon to grid
-        let slot = get_slot_mut(&mut room.grid, 0, 0);
+        let slot = get_slot_mut(&mut room.grid, x, y);
         slot.player = option::some<PlayerIcon>(PlayerIcon {
-            player_id: vector::length<Player>(&room.players_list)
+            player_id: vector::length<Player>(&room.players_list) - 1,
         });
 
+        // add input entry in moves
+        table::upsert(
+            &mut room.moves,
+            player_addr,
+            Move {
+                x,y
+            }
+        );
 
     }
 
     /*
     Add input, to be simulated next turn
     */
-    fun add_player_input(player: address, room_id: u64, x: u64, y: u64) acquires RoomsList {
+    public entry fun add_player_input(player: address, room_id: u64, x: u64, y: u64) acquires RoomsList {
         // assert!( (x >= 0 && x < C_SIZE) && (y >= 0 && y < C_SIZE), E_INVALID_INPUT);
 
         let rooms = borrow_global_mut<RoomsList>(@revanth);
@@ -267,7 +307,7 @@ module revanth::dapp {
                 let rooms = borrow_global<RoomsList>(@revanth);
                 let room = vector::borrow(&rooms.rooms_list, room_id);
 
-                let player = vector::borrow(&room.players_list, i);
+                let player = vector::borrow(&room.players_list, pick_id);
                 player.position
             };
 
@@ -284,6 +324,11 @@ module revanth::dapp {
         smart_table::destroy(map);
 
         // Stage 2: Player + Item = Event ( Roll )
+        // items to delete
+        let items_to_delete = vector::empty<u64>();
+        let items_del_mut_ref = &mut items_to_delete;
+        let flag_win = false;
+
         i = 0;
         while(i < items_len) {
             let (item_code, position) = {
@@ -297,39 +342,86 @@ module revanth::dapp {
             // EVENT: BOX   
             if( item_code == I_BOX ) {
                 // key probability
+                let has_key = get_rand_range(0,100) < 20;
 
-                // select a player to give key
+                if(has_key) {
+                    let rooms = borrow_global<RoomsList>(@revanth);
+                    let room = vector::borrow(&rooms.rooms_list, room_id);
+                    let slot = get_slot(&room.grid, position.x, position.y);
+                        
+                    if( option::is_some(&slot.player) ) {
+                        // add to inventory
+                        let p_icon = option::borrow<PlayerIcon>(&slot.player);
+                        player_add_item(room_id, p_icon.player_id, I_KEY);
 
 
-                    // add to inventory
+                        // delete box
+                        vector::push_back(
+                            items_del_mut_ref,
+                            i,
+                        );
 
-                    // Delete Item ( only from items_list )
-
-
-
-
+                    }
+                };
             }
             // EVENT: EXIT DOOR
             else if( item_code == I_EXIT ) {
-                // player should have key, only one player wins 
+                // player should have key
+                let (p_id, has_key, slot_filled) = {
+                    let rooms = borrow_global_mut<RoomsList>(@revanth);
+                    let room = vector::borrow_mut(&mut rooms.rooms_list, room_id);
+                    let slot = get_slot(&room.grid, position.x, position.y);
+                    let p_id;
+                    let is;
+                    let has_key;
 
+                    if (option::is_some(&slot.player)) {
+                        let p_icon = option::borrow<PlayerIcon>(&slot.player);
+                        p_id = p_icon.player_id;
+                        let p = vector::borrow(&room.players_list, p_id);
+                        has_key = table::contains(&p.inventory, I_KEY);
+                        is = true;
+                    } 
+                    else {
+                        p_id = 0;
+                        is = false;
+                        has_key = false;
+                    };
 
-                // filter players with keys
+                    (p_id, has_key, is)
+                };
+ 
+                if( slot_filled && has_key ) {
+                    // add win item
+                    player_add_item(room_id, p_id, I_WON);
 
-
-                // pick a winner
-
-
-                // give player WIN item
-
-
-                // END flag
+                    // end game
+                    flag_win = true;
+                };
 
             }
             else {
                 // pass
             };
 
+            i = i + 1;
+        };
+
+        // Step 3: Delete items now
+        i = 0;
+        while(i < vector::length(items_del_mut_ref)) {
+            let id = vector::borrow(items_del_mut_ref, i);
+
+            room_del_item(room_id, *id);
+
+            i = i + 1;
+        };   
+
+        // Step 4: Process Flags ( because barrow checker is hell )
+        if( flag_win ) {
+            let rooms = borrow_global_mut<RoomsList>(@revanth);
+            let room = vector::borrow_mut(&mut rooms.rooms_list, room_id);
+            room.active = false;
         };
 
     }
@@ -442,8 +534,10 @@ module revanth::dapp {
         };
         
         // AA for list, items cannot loose their context id
-        let x_item = vector::borrow_mut(&mut room.items_list, item_id);
-        x_item.id = item_id;
+        if( vector::length<Item>(&room.items_list) > 0) {
+            let x_item = vector::borrow_mut(&mut room.items_list, item_id);
+            x_item.id = item_id;
+        }
     }
 
     /*
@@ -465,67 +559,111 @@ module revanth::dapp {
 
     /*
     View Functions
-    
-
+    */
     #[view]
-    public entry fun get_rooms() : (vector<string::string>, vector<u64>, vector<u64>, u64) {
-        let roomslist = borrow_global_mut<RoomsList>(@revanth);
-        let names = vector::empty<string::string>();
-        let ids = vector::empty<u64>();
-        let counts = vector::empty<u64>();
-
+    public fun get_rooms(): vector<RoomMiniView> acquires RoomsList {
+        let rooms = borrow_global<RoomsList>(@revanth);
         let i = 0;
-        while(i < vector::length(&roomslist)) {
-            let room = vector::borrow(&roomslist, i);
+        let vec = vector::empty<RoomMiniView>();
 
-            vector::push_back(&names, room.name );
-            vector::Push_back(&ids, i);
+        let rooms_ref = &rooms.rooms_list;
+        while( i < vector::length(rooms_ref)) {
+            let room = vector::borrow(rooms_ref, i);
             vector::push_back(
-                &counts,
-                vector::length(&room.moves)
+                &mut vec,
+                RoomMiniView {
+                    id: room.id,
+                    name: room.name,
+                    active: room.active,
+                    player_count: vector::length(&room.players_list),
+                    max_player_count: C_MAX_PLAYERS,
+                }
             );
 
             i = i + 1;
         };
 
-        (names, ids, counts, C_MAX_PLAYERS)
-    }
+        vec
+    } 
 
-    
-    /// Return the entire grid as a linear vector. returns Size for unpacking
-    
     #[view]
-    public entry fun get_one_room(room_id: u8): (vector<u64>, u64) {
-        let series = vector::empty<u64>();
+    public fun get_room(room_id: u64): RoomView acquires RoomsList {
+        let rooms = borrow_global<RoomsList>(@revanth);
+        let room = vector::borrow<Room>(&rooms.rooms_list, room_id);
 
-        let roomslist = borrow_global_mut<RoomsList>(@revanth);
-        let room = vector::borrow(&roomslist.rooms_list, room_id);
+        let vec = vector::empty<PlayerMiniView>();
 
         let i = 0;
-        let j = 0;
+        while(i < vector::length(&room.players_list)) {
+            let j : u8 = 2;
+            let p = vector::borrow(&room.players_list, i);
+            let vec2 = vector::empty<u64>();
 
-        while(i < C_SIZE) {
-            let row = vector::borrow(&room.grid, i);
-            j = 0;
-            while(j < C_SIZE) {
-                let x = vector::borrow(&row, j);
-                series.push_back(&mut series, x);
+            while(j <= I_MAX) {
+                if( table::contains(&p.inventory, j)) {
+                    vector::push_back(&mut vec2, (j as u64) );
+                };
 
-                j = j+1;
+                j = j + 1;
             };
 
-            i = i+1;
+            debug::print(&vec2);
+
+            vector::push_back(
+                &mut vec,
+                PlayerMiniView {
+                    address: p.address,
+                    inventory: vec2,
+                    position: p.position,
+                }
+            );
+
+            i = i + 1;
         };
 
-        (series, C_SIZE)
+        let room_view = RoomView {
+            name: room.name,
+            id: room.id,
+            active: room.active,
+            players_list: vec,
+            items_list: room.items_list,
+        };
+
+        room_view
+    }   
+
+
+    #[test(admin=@revanth, man=@0x1)]
+    fun movement_test(admin: &signer, man: &signer) acquires RoomsList {
+        // init OK
+        init_module(admin);
+
+        // create a room OK
+        create_room();
+        add_player(signer::address_of(admin), 0, 0, 0);
+        room_add_item(0, 2, 0, 1);
+        player_add_item(0, 0, 3);
+        player_add_item(0, 0, 2);
+
+
+        let out = get_room(0);
+
+        debug::print(&out);
+
+        let vec: vector<u8> = vector[3];
+
+        debug::print(&vec);
+
     }
 
-    */
+    #[test_only]
+    fun print_room(id: u64) acquires RoomsList {
+        let rooms = borrow_global<RoomsList>(@revanth);
+        let room = vector::borrow(&rooms.rooms_list, id);
 
-    #[test]
-    fun test() {
-        let ans = string::utf8(b"hello dapp!");
-        debug::print(&ans);
+        
+
+        debug::print(room);
     }
 
 }

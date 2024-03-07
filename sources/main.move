@@ -6,7 +6,9 @@ module revanth::dapp {
     use std::signer;
 
     use aptos_framework::table;
+    use aptos_framework::math64;
     use aptos_framework::smart_table;
+    use aptos_framework::randomness;
 
     // error codes
     const E_INVALID_INPUT: u8 = 1;
@@ -44,7 +46,8 @@ module revanth::dapp {
 
     // Player ( lowest )
     struct Slot has key, store {
-        player: option::Option<PlayerIcon>, 
+        player: option::Option<PlayerIcon>,
+        used: bool,
     }
 
     // Player Icon ( wow )
@@ -64,7 +67,7 @@ module revanth::dapp {
         id: u64,
         active: bool,
         player_count: u64,
-        max_player_count: u8,
+        max_player_count: u64,
     }
 
     struct PlayerMiniView has key, store, drop, copy {
@@ -87,13 +90,15 @@ module revanth::dapp {
 
 
     // items
-    const I_EXIT: u8 = 2;
-    const I_KEY: u8 = 3;
-    const I_BOX: u8 = 4;
-    const I_WON: u8 = 5;
+    const I_EXIT: u8 = 0;
+    const I_KEY: u8 = 1;
+    const I_EMPTY_BOX: u8 = 2;
+    const I_LOOT_BOX: u8 = 3;
+    const I_WON: u8 = 4;
 
-    // last item id
-    const I_MAX: u8 = 5;
+    // frequency distribution of items
+    const I_COUNT: vector<u64> = vector[1, 0, 4, 1, 0];
+
 
     // directions
     const D_UP: u8 = 1;
@@ -102,13 +107,13 @@ module revanth::dapp {
     const D_LEFT: u8 = 4;
 
     // size
-    const C_SIZE: u8 = 10;
-    const C_MAX_PLAYERS: u8 = 5;
+    const C_SIZE: u64 = 15;
+    const C_MAX_PLAYERS: u64 = 5;
     
     /*
     runs only once in lifetime
     */
-    public entry fun init_module(account: &signer) {
+    fun init_module(account: &signer) {
         move_to<RoomsList>(
             account,
             RoomsList {
@@ -121,56 +126,118 @@ module revanth::dapp {
     Creates a single room and adds it to RoomList
     */
     public entry fun create_room() acquires RoomsList {
-        let roomslist = borrow_global_mut<RoomsList>(@revanth);
-        let room = Room {
-            name: string::utf8(b"New Room"),
-            grid: vector::empty<vector<Slot>>(),
-            id: vector::length<Room>(&roomslist.rooms_list),
-            moves: table::new<address, Move>(),
-            active: true,
-            players_list: vector::empty<Player>(),
-            items_list: vector::empty<Item>(),
-        };
-
-        let i = 0;
-        let j = 0;
-
-        while(i < C_SIZE) {
-            let row = vector::empty<Slot>();
-
-            j = 0;
-            while(j < C_SIZE) {
-                // create Slot
-                vector::push_back(
-                    &mut row,
-                    Slot {
-                        player: option::none<PlayerIcon>(),
-                    }
-                );
-
-                // Random Item Generation
-                // use j, i => x, y
-
-                
-                j = j+1;
+        let room_id = {
+            let roomslist = borrow_global_mut<RoomsList>(@revanth);
+            let room_id = vector::length<Room>(&roomslist.rooms_list);
+            let room = Room {
+                name: string::utf8(b"New Room"),
+                grid: vector::empty<vector<Slot>>(),
+                id: room_id,
+                moves: table::new<address, Move>(),
+                active: true,
+                players_list: vector::empty<Player>(),
+                items_list: vector::empty<Item>(),
             };
 
-            vector::push_back(&mut room.grid, row);
-            i = i+1;
+            let i = 0;
+            let j = 0;
+
+            while(i < C_SIZE) {
+                let row = vector::empty<Slot>();
+
+                j = 0;
+                while(j < C_SIZE) {
+                    // create Slot
+                    vector::push_back(
+                        &mut row,
+                        Slot {
+                            player: option::none<PlayerIcon>(),
+                            used: false,
+                        }
+                    );
+
+                    j = j+1;
+                };
+
+                vector::push_back(&mut room.grid, row);
+                i = i+1;
+            };
+
+            // finally add to RoomsList
+            vector::push_back(&mut roomslist.rooms_list, room);
+
+            room_id
         };
 
-        
+        // Construct Items
+        let i = 0;
+        let items = vector::empty<u64>();
 
-        vector::push_back(&mut roomslist.rooms_list, room);
+        while(i < vector::length(&I_COUNT)) {
+            let count = (*vector::borrow(&I_COUNT, i) as u64);
+            let j = 0;
+            while(j < count) {
+                vector::push_back(&mut items, i);
+                j = j + 1;
+            };
+
+            i = i + 1;
+        };
+
+        // Randomly Place items
+        let n = math64::sqrt(vector::length(&items)) + 1;
+        // C_ZONE_SIZE = 5, for now
+        let s = C_SIZE / n;
+
+        i = 0;
+        while(i < n) {
+            let j = 0;
+            while(j < n) {
+                // pick ONE point
+                let x = get_rand_range(0, s);
+                let y = get_rand_range(0, s);
+
+                x = (i * s) + x;
+                y = (j * s) + y;
+
+                // get random item code, IF there are any
+                if( vector::length(&items) > 0) {
+                    let rid = get_rand_range(0, vector::length(&items));
+                    let item_code = vector::remove(&mut items, rid);
+
+                    // place item
+                    // u64 -> u8, dangeorus
+                    room_add_item(room_id, (item_code as u8), x, y);
+                };
+
+                j = j + 1;
+            };
+
+            i = i + 1;
+        };
+
     }
 
     /*
     Adds player into the Room Moves Dictionary.
     */
-    public entry fun add_player(player_addr: address, room_id: u64, x:u64, y: u64) acquires RoomsList {
+    public entry fun add_player(player_addr: address, room_id: u64) acquires RoomsList {
         let rooms = borrow_global_mut<RoomsList>(@revanth);
         let room = vector::borrow_mut(&mut rooms.rooms_list, room_id);
         
+        // random placement of player
+        let player_id = vector::length(&room.players_list);
+        let n = 3;
+
+        let cx = player_id / n;
+        let cy = player_id % n;
+
+        let x = get_rand_range(0, 5);
+        let y = get_rand_range(0, 5);
+        
+        x = (cx * 5) + x;
+        y = (cy * 5) + y;
+
         let player = Player {
             address: player_addr,
             inventory: table::new<u8, u8>(),
@@ -339,8 +406,8 @@ module revanth::dapp {
                 ( item.item_code, item.position )
             };
 
-            // EVENT: BOX   
-            if( item_code == I_BOX ) {
+            // EVENT: LOOT BOX   
+            if( item_code == I_LOOT_BOX ) {
                 // key probability
                 let has_key = get_rand_range(0,100) < 20;
 
@@ -466,9 +533,9 @@ module revanth::dapp {
     }
 
     public fun get_rand_range(l: u64, _h: u64): u64 {
-
+        // randomness::u64_range(l, _h)
         l
-    }
+    }   
 
     /*
     Game Functions
@@ -595,11 +662,11 @@ module revanth::dapp {
 
         let i = 0;
         while(i < vector::length(&room.players_list)) {
-            let j : u8 = 2;
+            let j : u8 = 0;
             let p = vector::borrow(&room.players_list, i);
             let vec2 = vector::empty<u64>();
 
-            while(j <= I_MAX) {
+            while((j as u64) <= vector::length(&I_COUNT)) {
                 if( table::contains(&p.inventory, j)) {
                     vector::push_back(&mut vec2, (j as u64) );
                 };
@@ -633,27 +700,19 @@ module revanth::dapp {
     }   
 
 
-    #[test(admin=@revanth, man=@0x1)]
-    fun movement_test(admin: &signer, man: &signer) acquires RoomsList {
+    #[test(admin=@revanth, fx=@aptos_framework)]
+    fun movement_test(admin: &signer, fx: &signer) acquires RoomsList {
         // init OK
         init_module(admin);
 
         // create a room OK
         create_room();
-        add_player(signer::address_of(admin), 0, 0, 0);
-        room_add_item(0, 2, 0, 1);
-        player_add_item(0, 0, 3);
-        player_add_item(0, 0, 2);
 
+        // players
+        add_player(signer::address_of(admin), 0);
+        add_player(signer::address_of(fx), 0);
 
-        let out = get_room(0);
-
-        debug::print(&out);
-
-        let vec: vector<u8> = vector[3];
-
-        debug::print(&vec);
-
+        print_room(0);
     }
 
     #[test_only]

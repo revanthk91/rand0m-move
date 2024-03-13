@@ -4,13 +4,13 @@ version = "1.0.0"
 authors = []
 
 [addresses]
-revanth = "26b0ab8afb0b67adcbeab1d1f04ef8d067c5b7b8f0ee65e23994bf3d00a4506f"
+revanth = "0x1d8ac78bfa38e97ebf3b2bb05886c9d666b854fd6c858f0217abcc7789b42217"
 
 [dev-addresses]
 
 [dependencies.AptosFramework]
 git = "https://github.com/aptos-labs/aptos-core.git"
-rev = "main"
+rev = "devnet"
 subdir = "aptos-move/framework/aptos-framework"
 
 [dev-dependencies]

@@ -11,8 +11,9 @@ module revanth::dapp {
     use aptos_framework::randomness;
 
     // error codes
-    const E_INVALID_INPUT: u8 = 1;
-    const E_PLAYER_ALREADY_JOINED: u8 = 2;
+    const E_INVALID_INPUT: u64 = 1;
+    const E_PLAYER_ALREADY_JOINED: u64 = 2;
+    const E_INVALID_CRAFT: u64 = 3;
 
     // Table of Room
     struct RoomsList has key, store {
@@ -25,21 +26,25 @@ module revanth::dapp {
         grid: vector<vector<Slot>>,
         id: u64,
         moves: table::Table<address,Move>,
+        crafts: table::Table<u64, option::Option<vector<u64>>>,
         players_list: vector<Player>,
         items_list: vector<Item>,
         active: bool,
+        winner: option::Option<address>,
+        max_player_count: u64,
     }
 
     // Player (oomp)
     struct Player has key, store {
         address: address,
-        inventory: table::Table<u8, u8>,
+        inventory: table::Table<u64, u64>,
         position: Move,
+        id: u64,
     }
 
     // Item (oomp)
     struct Item has key, store, copy, drop {
-        item_code: u8,
+        item_code: u64,
         position: Move,
         id: u64,
     }
@@ -59,6 +64,12 @@ module revanth::dapp {
     struct Move has key, store, drop, copy {
         x: u64,
         y: u64,
+    }
+
+
+    // GameState
+    struct GameState has key, store {
+        crafts: table::Table<vector<u64>, vector<u64>>,
     }
 
     // VIEW returns
@@ -84,21 +95,14 @@ module revanth::dapp {
         name: string::String,
         id: u64,
         active: bool,
+        winner: option::Option<address>,
         players_list: vector<PlayerMiniView>,
         items_list: vector<Item>,
     }
 
 
-    // items
-    const I_EXIT: u8 = 0;
-    const I_KEY: u8 = 1;
-    const I_EMPTY_BOX: u8 = 2;
-    const I_LOOT_BOX: u8 = 3;
-    const I_WON: u8 = 4;
-
-    // frequency distribution of items
-    const I_COUNT: vector<u64> = vector[1, 0, 4, 1, 0];
-
+    // thats it
+    const C_MAX_ITEM: u64 = 5; // 1 2 3 4 5 999
 
     // directions
     const D_UP: u8 = 1;
@@ -120,108 +124,67 @@ module revanth::dapp {
                 rooms_list: vector::empty<Room>(),
             }
         );
+
+        move_to<GameState>(
+            account,
+            GameState {
+                crafts: table::new<vector<u64>, vector<u64>>(),
+            }
+        );
     }
 
     /*
     Creates a single room and adds it to RoomList
     */
-    public entry fun create_room() acquires RoomsList {
-        let room_id = {
-            let roomslist = borrow_global_mut<RoomsList>(@revanth);
-            let room_id = vector::length<Room>(&roomslist.rooms_list);
-            let room = Room {
-                name: string::utf8(b"New Room"),
-                grid: vector::empty<vector<Slot>>(),
-                id: room_id,
-                moves: table::new<address, Move>(),
-                active: true,
-                players_list: vector::empty<Player>(),
-                items_list: vector::empty<Item>(),
-            };
-
-            let i = 0;
-            let j = 0;
-
-            while(i < C_SIZE) {
-                let row = vector::empty<Slot>();
-
-                j = 0;
-                while(j < C_SIZE) {
-                    // create Slot
-                    vector::push_back(
-                        &mut row,
-                        Slot {
-                            player: option::none<PlayerIcon>(),
-                            used: false,
-                        }
-                    );
-
-                    j = j+1;
-                };
-
-                vector::push_back(&mut room.grid, row);
-                i = i+1;
-            };
-
-            // finally add to RoomsList
-            vector::push_back(&mut roomslist.rooms_list, room);
-
-            room_id
+    entry fun create_room() acquires RoomsList {
+        let roomslist = borrow_global_mut<RoomsList>(@revanth);
+        let room_id = vector::length<Room>(&roomslist.rooms_list);
+        let room = Room {
+            name: string::utf8(b"New Room"),
+            grid: vector::empty<vector<Slot>>(),
+            id: room_id,
+            moves: table::new<address, Move>(),
+            crafts: table::new<u64, option::Option<vector<u64>>>(),
+            active: false,
+            players_list: vector::empty<Player>(),
+            items_list: vector::empty<Item>(),
+            winner: option::none(),
+            max_player_count: C_MAX_PLAYERS,
         };
 
-        // Construct Items
         let i = 0;
-        let items = vector::empty<u64>();
+        let j = 0;
 
-        while(i < vector::length(&I_COUNT)) {
-            let count = (*vector::borrow(&I_COUNT, i) as u64);
-            let j = 0;
-            while(j < count) {
-                vector::push_back(&mut items, i);
-                j = j + 1;
+        while(i < C_SIZE) {
+            let row = vector::empty<Slot>();
+
+            j = 0;
+            while(j < C_SIZE) {
+                // create Slot
+                vector::push_back(
+                    &mut row,
+                    Slot {
+                        player: option::none<PlayerIcon>(),
+                        used: false,
+                    }
+                );
+
+                j = j+1;
             };
 
-            i = i + 1;
+            vector::push_back(&mut room.grid, row);
+            i = i+1;
         };
 
-        // Randomly Place items
-        let n = math64::sqrt(vector::length(&items)) + 1;
-        // C_ZONE_SIZE = 5, for now
-        let s = C_SIZE / n;
-
-        i = 0;
-        while(i < n) {
-            let j = 0;
-            while(j < n) {
-                // pick ONE point
-                let x = get_rand_range(0, s);
-                let y = get_rand_range(0, s);
-
-                x = (i * s) + x;
-                y = (j * s) + y;
-
-                // get random item code, IF there are any
-                if( vector::length(&items) > 0) {
-                    let rid = get_rand_range(0, vector::length(&items));
-                    let item_code = vector::remove(&mut items, rid);
-
-                    // place item
-                    // u64 -> u8, dangeorus
-                    room_add_item(room_id, (item_code as u8), x, y);
-                };
-
-                j = j + 1;
-            };
-
-            i = i + 1;
-        };
-
+        // finally add to RoomsList
+        vector::push_back(&mut roomslist.rooms_list, room);
     }
+
 
     /*
     Adds player into the Room Moves Dictionary.
     */
-    public entry fun add_player(player_addr: address, room_id: u64) acquires RoomsList {
+    entry fun add_player(player_addr: address, room_id: u64) acquires RoomsList {
         let rooms = borrow_global_mut<RoomsList>(@revanth);
         let room = vector::borrow_mut(&mut rooms.rooms_list, room_id);
         
@@ -240,12 +203,32 @@ module revanth::dapp {
 
         let player = Player {
             address: player_addr,
-            inventory: table::new<u8, u8>(),
+            inventory: table::new<u64, u64>(),
             position: Move {
                 x,
                 y,
-            }
+            },
+            id: player_id,
         };
+
+        // initialize inventory
+        let i = 0;
+        while(i <= C_MAX_ITEM) {
+            table::upsert(
+                &mut player.inventory,
+                i,
+                0,
+            );
+
+            i = i + 1;
+        };
+
+        table::upsert(
+            &mut player.inventory,
+            999,
+            0,
+        );
+
 
         // add in player list
         vector::push_back(
@@ -268,12 +251,65 @@ module revanth::dapp {
             }
         );
 
+        // add input entry in crafts
+        table::upsert(
+            &mut room.crafts,
+            player_id,
+            option::none(),
+        );
+
+    }
+
+    /*
+    Add player craft
+    */
+    entry fun add_player_craft(room_id: u64, player_id: u64, a: u64, b: u64) acquires RoomsList {
+        let rooms = borrow_global_mut<RoomsList>(@revanth);
+        let room = vector::borrow_mut(&mut rooms.rooms_list, room_id);
+
+        // sort
+        if(a > b) {
+            let x = a;
+            a = b;
+            b = x;
+        };
+
+        table::upsert(
+            &mut room.crafts,
+            player_id,
+            option::some(vector[a,b]),
+        );
+
+    }
+
+    /*
+    DEV ONLY
+    Add new craft
+    */
+    entry fun add_craft(a: u64, b: u64, c: u64, p: u64) acquires GameState {
+        let gamestate = borrow_global_mut<GameState>(@revanth);
+
+        // so, order doesnt matter anymore
+        if (a > b) {
+            let x = a;
+            a = b;
+            b = x;
+            // swap
+        };
+        
+        // add / modify recipes. you asked, you got.
+        table::upsert(
+            &mut gamestate.crafts,
+            vector[a,b],
+            vector[c,p],
+        );
+
     }
 
     /*
     Add input, to be simulated next turn
     */
-    public entry fun add_player_input(player: address, room_id: u64, x: u64, y: u64) acquires RoomsList {
+    entry fun add_player_input(player: address, room_id: u64, x: u64, y: u64) acquires RoomsList {
         // assert!( (x >= 0 && x < C_SIZE) && (y >= 0 && y < C_SIZE), E_INVALID_INPUT);
 
         let rooms = borrow_global_mut<RoomsList>(@revanth);
@@ -298,7 +334,7 @@ module revanth::dapp {
     Use APTOS ROLL and simulate every move.
     Do it last.
     */
-    public entry fun update_room(room_id: u64) acquires RoomsList {
+    entry fun update_room(room_id: u64) acquires RoomsList, GameState {
         let players_len = {
             let rooms = borrow_global<RoomsList>(@revanth);
             let room = vector::borrow(&rooms.rooms_list, room_id);
@@ -312,6 +348,22 @@ module revanth::dapp {
 
             vector::length<Item>(&room.items_list)
         };
+
+        // Stage 0:
+        {
+            let rooms = borrow_global_mut<RoomsList>(@revanth);
+            let room = vector::borrow_mut(&mut rooms.rooms_list, room_id);
+
+            if(players_len < C_MAX_PLAYERS || option::is_some(&room.winner)) {
+                room.active = false;
+                return;
+            }
+            else {
+                room.active = true;
+            };
+
+        };
+        
 
         // Stage 1: Move Player
         let map = smart_table::new<Move, vector<u64>>();
@@ -367,8 +419,10 @@ module revanth::dapp {
             let nextmove = vector::borrow(&moves, j);
             let mapped_players = smart_table::borrow(map_ref, *nextmove);
 
+
             // ROLL to pick a player out MAX. 4
-            let pick_id = get_rand_range(0, vector::length<u64>(mapped_players));
+            let rid = get_rand_range(0, vector::length<u64>(mapped_players));
+            let pick_id = *vector::borrow(mapped_players, rid);
 
             let current_pos = {
                 let rooms = borrow_global<RoomsList>(@revanth);
@@ -390,85 +444,52 @@ module revanth::dapp {
         // drop the smart table
         smart_table::destroy(map);
 
-        // Stage 2: Player + Item = Event ( Roll )
+        // Stage 2: Item goes to Player Inventory
         // items to delete
         let items_to_delete = vector::empty<u64>();
         let items_del_mut_ref = &mut items_to_delete;
-        let flag_win = false;
 
         i = 0;
         while(i < items_len) {
-            let (item_code, position) = {
-                let rooms = borrow_global<RoomsList>(@revanth);
-                let room = vector::borrow(&rooms.rooms_list, room_id);
+            let rooms = borrow_global_mut<RoomsList>(@revanth);
+            let room = vector::borrow_mut(&mut rooms.rooms_list, room_id);
 
-                let item = vector::borrow(&room.items_list, i);
-                ( item.item_code, item.position )
-            };
+            let item = vector::borrow(&room.items_list, i);
+            let row = vector::borrow_mut(&mut room.grid, item.position.y);
+            let slot = vector::borrow_mut(row, item.position.x);
 
-            // EVENT: LOOT BOX   
-            if( item_code == I_LOOT_BOX ) {
-                // key probability
-                let has_key = get_rand_range(0,100) < 20;
+            if( option::is_some(&slot.player) ) {
+                // actual action
+                let picon = option::borrow<PlayerIcon>(&slot.player);
+                let player = vector::borrow_mut(&mut room.players_list, picon.player_id);
+                let inventory = &mut player.inventory;
 
-                if(has_key) {
-                    let rooms = borrow_global<RoomsList>(@revanth);
-                    let room = vector::borrow(&rooms.rooms_list, room_id);
-                    let slot = get_slot(&room.grid, position.x, position.y);
-                        
-                    if( option::is_some(&slot.player) ) {
-                        // add to inventory
-                        let p_icon = option::borrow<PlayerIcon>(&slot.player);
-                        player_add_item(room_id, p_icon.player_id, I_KEY);
-
-
-                        // delete box
-                        vector::push_back(
-                            items_del_mut_ref,
-                            i,
-                        );
-
-                    }
-                };
-            }
-            // EVENT: EXIT DOOR
-            else if( item_code == I_EXIT ) {
-                // player should have key
-                let (p_id, has_key, slot_filled) = {
-                    let rooms = borrow_global_mut<RoomsList>(@revanth);
-                    let room = vector::borrow_mut(&mut rooms.rooms_list, room_id);
-                    let slot = get_slot(&room.grid, position.x, position.y);
-                    let p_id;
-                    let is;
-                    let has_key;
-
-                    if (option::is_some(&slot.player)) {
-                        let p_icon = option::borrow<PlayerIcon>(&slot.player);
-                        p_id = p_icon.player_id;
-                        let p = vector::borrow(&room.players_list, p_id);
-                        has_key = table::contains(&p.inventory, I_KEY);
-                        is = true;
-                    } 
-                    else {
-                        p_id = 0;
-                        is = false;
-                        has_key = false;
-                    };
-
-                    (p_id, has_key, is)
-                };
- 
-                if( slot_filled && has_key ) {
-                    // add win item
-                    player_add_item(room_id, p_id, I_WON);
-
-                    // end game
-                    flag_win = true;
+                // add item
+                // 0TH
+                if( !table::contains(inventory, item.item_code) ) {
+                    table::upsert(
+                        inventory,
+                        item.item_code,
+                        0
+                    );
                 };
 
-            }
-            else {
-                // pass
+                // upsert
+                let x = *table::borrow(inventory, item.item_code);
+                x = x + 1;
+                
+                table::upsert(
+                    inventory,
+                    item.item_code,
+                    x,
+                );
+
+                // add to delete
+                vector::push_back(
+                    items_del_mut_ref,
+                    item.id,
+                );
+
             };
 
             i = i + 1;
@@ -482,22 +503,125 @@ module revanth::dapp {
             room_del_item(room_id, *id);
 
             i = i + 1;
-        };   
-
-        // Step 4: Process Flags ( because barrow checker is hell )
-        if( flag_win ) {
-            let rooms = borrow_global_mut<RoomsList>(@revanth);
-            let room = vector::borrow_mut(&mut rooms.rooms_list, room_id);
-            room.active = false;
         };
 
+        // Step 4: Craft
+        {
+            let rooms = borrow_global_mut<RoomsList>(@revanth);
+            let room = vector::borrow_mut(&mut rooms.rooms_list, room_id);
+
+            i = 0;
+            while(i < vector::length(&room.players_list)) {
+                let craft = table::borrow(&room.crafts, i);
+                let player = vector::borrow_mut(&mut room.players_list, i);
+                let inventory = &mut player.inventory;
+
+                if(option::is_some(craft)) {
+                    let ab = option::borrow<vector<u64>>(craft);
+                    let a = *vector::borrow(ab, 0);
+                    let b = *vector::borrow(ab, 1);
+                    let c = 0;
+
+                    // just -1, a,b
+                    // consume first, gen later
+                    let x;
+                    x = *table::borrow(inventory, a);
+                    assert!(x > 0, E_INVALID_CRAFT);
+                    table::upsert(
+                        inventory,
+                        a,
+                        x - 1,
+                    );
+
+                    x = *table::borrow(inventory, b);
+                    assert!(x > 0, E_INVALID_CRAFT);
+                    table::upsert(
+                        inventory,
+                        b,
+                        x - 1,
+                    );
+
+                    // CHAOS IS 0, SKY IS 999
+                    if(a == 0 && b == 0) {
+                        // * + *
+                        c = roll_craft(999, 1);
+                    }
+                    else if(a == 0) {
+                        // * + b
+                        let x = get_rand_range(1, C_MAX_ITEM + 1);
+
+                        c = roll_craft(x, 10);
+                    }
+                    else {
+                        // a + b, the only GameState
+                        let gamestate = borrow_global<GameState>(@revanth);
+
+                        if( table::contains(&gamestate.crafts, vector[a,b])) {
+                            let match = table::borrow(
+                                &gamestate.crafts,
+                                vector[a,b],
+                            );
+
+                            let c = *vector::borrow(match, 0);
+                            let p = *vector::borrow(match, 1);
+
+                            c = roll_craft(c, p);
+                        };
+                        
+                    };
+
+                    // finally add c
+                    x = *table::borrow(inventory, c);
+                    table::upsert(
+                        inventory,
+                        c,
+                        x + 1,
+                    );
+
+                    // sky
+                    if(c == 999) room.winner = option::some(player.address);
+
+                };
+
+                i = i + 1;
+            };
+
+
+        };
+
+        // Step 5: Stream of Randomness
+        {
+            let rx = get_rand_range(0, 15);
+            let ry = get_rand_range(0, 15);
+            let rcode = get_rand_range(1, C_MAX_ITEM + 1);
+
+            room_add_item(room_id, rcode, rx, ry);
+
+        };
+
+
     }
+
+    /*
+    Roll Craft
+    */
+    fun roll_craft(c: u64, p:u64): u64 {
+        let r = get_rand_range(0,100);
+
+        if(r < p) {
+            return c;
+        };
+
+        0 // CHAOS
+    }
+
+
 
     /*
     Adds item to the given room at x, y
     No collision check
     */
-    fun add_item(roomid: u64, item_code: u8, x: u64, y: u64) acquires RoomsList{
+    fun add_item(roomid: u64, item_code: u64, x: u64, y: u64) acquires RoomsList{
         let rooms = borrow_global_mut<RoomsList>(@revanth);
         let room = vector::borrow_mut(&mut rooms.rooms_list, roomid);
         let items_len = vector::length<Item>(&room.items_list);
@@ -520,22 +644,22 @@ module revanth::dapp {
     /*
     Helper Functions
     */
-    public fun get_slot_mut(grid: &mut vector<vector<Slot>>, x: u64, y: u64): &mut Slot  {
+    fun get_slot_mut(grid: &mut vector<vector<Slot>>, x: u64, y: u64): &mut Slot  {
         let row = vector::borrow_mut(grid, y);
 
         vector::borrow_mut(row, x)
     }
 
-    public fun get_slot(grid: &vector<vector<Slot>>, x: u64, y: u64): &Slot {
+    fun get_slot(grid: &vector<vector<Slot>>, x: u64, y: u64): &Slot {
         let row = vector::borrow(grid, y);
 
         vector::borrow(row, x)
     }
 
-    public fun get_rand_range(l: u64, _h: u64): u64 {
+    fun get_rand_range(l: u64, _h: u64): u64 {
         // randomness::u64_range(l, _h)
         l
-    }   
+    }
 
     /*
     Game Functions
@@ -572,7 +696,7 @@ module revanth::dapp {
         slot.player = option::none<PlayerIcon>();
     }
 
-    fun room_add_item(room_id: u64, item_code: u8, x: u64, y: u64) acquires RoomsList {
+    fun room_add_item(room_id: u64, item_code: u64, x: u64, y: u64) acquires RoomsList {
         let roomslist = borrow_global_mut<RoomsList>(@revanth);
         let room = vector::borrow_mut(&mut roomslist.rooms_list, room_id);
         let len = vector::length<Item>(&room.items_list);
@@ -605,22 +729,6 @@ module revanth::dapp {
             let x_item = vector::borrow_mut(&mut room.items_list, item_id);
             x_item.id = item_id;
         }
-    }
-
-    /*
-    To Player's inventory
-    */
-    fun player_add_item(room_id: u64, player_id: u64, item_code: u8) acquires RoomsList {
-        let roomslist = borrow_global_mut<RoomsList>(@revanth);
-        let room = vector::borrow_mut(&mut roomslist.rooms_list, room_id);
-        let player = vector::borrow_mut(&mut room.players_list, player_id);
-
-        table::upsert(
-            &mut player.inventory,
-            item_code,
-            1,
-        );
-
     }
 
 
@@ -662,13 +770,20 @@ module revanth::dapp {
 
         let i = 0;
         while(i < vector::length(&room.players_list)) {
-            let j : u8 = 0;
+            let j = 0;
             let p = vector::borrow(&room.players_list, i);
             let vec2 = vector::empty<u64>();
 
-            while((j as u64) <= vector::length(&I_COUNT)) {
-                if( table::contains(&p.inventory, j)) {
-                    vector::push_back(&mut vec2, (j as u64) );
+            while(j <= C_MAX_ITEM) {
+                let count = *table::borrow(&p.inventory, j);
+                let k = 0;
+                while(k < count) {
+                    vector::push_back(
+                        &mut vec2,
+                        j,
+                    );
+
+                    k = k + 1;
                 };
 
                 j = j + 1;
@@ -694,14 +809,15 @@ module revanth::dapp {
             active: room.active,
             players_list: vec,
             items_list: room.items_list,
+            winner: room.winner,
         };
 
         room_view
     }   
 
 
-    #[test(admin=@revanth, fx=@aptos_framework)]
-    fun movement_test(admin: &signer, fx: &signer) acquires RoomsList {
+    #[test(admin=@revanth, fx=@0x25, fx2=@0x26)]
+    fun movement_test(admin: &signer, fx: &signer, fx2: &signer) acquires RoomsList, GameState {
         // init OK
         init_module(admin);
 
@@ -712,7 +828,26 @@ module revanth::dapp {
         add_player(signer::address_of(admin), 0);
         add_player(signer::address_of(fx), 0);
 
-        print_room(0);
+        update_room(0);
+
+        let v = get_room(0);
+        debug::print(&v);
+
+        update_room(0);
+        v = get_room(0);
+        debug::print(&v);
+
+        update_room(0);
+        v = get_room(0);
+        debug::print(&v);
+
+        add_player_input(signer::address_of(admin), 0, 1, 0);
+        add_player_craft(0, 0, 1, 1);
+        
+        update_room(0);
+        v = get_room(0);
+        debug::print(&v);
+
     }
 
     #[test_only]
@@ -720,7 +855,6 @@ module revanth::dapp {
         let rooms = borrow_global<RoomsList>(@revanth);
         let room = vector::borrow(&rooms.rooms_list, id);
 
-        
 
         debug::print(room);
     }

@@ -85,6 +85,7 @@ module revanth::dapp {
         address: address,
         inventory: vector<u64>,
         position: Move,
+        id: u64,
     }
 
     struct RoomsListView has key, store, drop, copy {
@@ -223,6 +224,7 @@ module revanth::dapp {
             i = i + 1;
         };
 
+        // also the CHAOS
         table::upsert(
             &mut player.inventory,
             999,
@@ -239,7 +241,7 @@ module revanth::dapp {
         // add in PlayerIcon to grid
         let slot = get_slot_mut(&mut room.grid, x, y);
         slot.player = option::some<PlayerIcon>(PlayerIcon {
-            player_id: vector::length<Player>(&room.players_list) - 1,
+            player_id,
         });
 
         // add input entry in moves
@@ -524,21 +526,23 @@ module revanth::dapp {
 
                     // just -1, a,b
                     // consume first, gen later
-                    let x;
-                    x = *table::borrow(inventory, a);
-                    assert!(x > 0, E_INVALID_CRAFT);
+                    let x = *table::borrow(inventory, a);
+                    let y = *table::borrow(inventory, b);
+
+                    if( x <= 0 || y <= 0 ) {
+                        continue;
+                    };
+
                     table::upsert(
                         inventory,
                         a,
                         x - 1,
-                    );
+                    ); 
 
-                    x = *table::borrow(inventory, b);
-                    assert!(x > 0, E_INVALID_CRAFT);
                     table::upsert(
                         inventory,
                         b,
-                        x - 1,
+                        y - 1,
                     );
 
                     // CHAOS IS 0, SKY IS 999
@@ -589,6 +593,25 @@ module revanth::dapp {
 
         };
 
+        // Step 4.1 Clear Craft Inputs
+        {
+            let i = 0;
+            let rooms = borrow_global_mut<RoomsList>(@revanth);
+            let room = vector::borrow_mut(&mut rooms.rooms_list, room_id);
+
+            while(i < vector::length(&room.players_list)) {
+
+                // upsert to option::none
+                table::upsert(
+                    &mut room.crafts,
+                    i,
+                    option::none(),
+                );
+
+                i = i + 1;
+            };
+        };
+
         // Step 5: Stream of Randomness
         {
             let rx = get_rand_range(0, 15);
@@ -603,7 +626,7 @@ module revanth::dapp {
     }
 
     /*
-    Roll Craft
+    Roll Craft with probablity P
     */
     fun roll_craft(c: u64, p:u64): u64 {
         let r = get_rand_range(0,100);
@@ -657,8 +680,8 @@ module revanth::dapp {
     }
 
     fun get_rand_range(l: u64, _h: u64): u64 {
-        // randomness::u64_range(l, _h)
-        l
+        randomness::u64_range(l, _h)
+        // l
     }
 
     /*
@@ -797,6 +820,7 @@ module revanth::dapp {
                     address: p.address,
                     inventory: vec2,
                     position: p.position,
+                    id: i,
                 }
             );
 

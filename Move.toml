@@ -4,7 +4,7 @@ version = "1.0.0"
 authors = []
 
 [addresses]
-revanth = "0x1d8ac78bfa38e97ebf3b2bb05886c9d666b854fd6c858f0217abcc7789b42217"
+revanth = "e5385db1465ff28c87f06296801e4861e238e8927c917e0af5d22151422dd495"
 
 [dev-addresses]
 
